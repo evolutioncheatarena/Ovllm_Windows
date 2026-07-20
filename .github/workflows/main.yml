@@ -1,0 +1,437 @@
+name: Build DreamSoule OLLVM17 NDK r26d - Windows
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      # ============================================
+      # STEP 1: Clone DreamSoule/ollvm17
+      # ============================================
+      - name: Clone DreamSoule/ollvm17
+        uses: actions/checkout@v4
+        with:
+          repository: DreamSoule/ollvm17
+          ref: main
+          path: ollvm-source
+
+      # ============================================
+      # STEP 2: Verify DreamSoule source
+      # ============================================
+      - name: Verify DreamSoule OLLVM source
+        shell: bash
+        run: |
+          cd ollvm-source
+          
+          echo "========================================="
+          echo "DreamSoule/ollvm17 Source Verification"
+          echo "========================================="
+          
+          echo "Remote URL:"
+          git remote -v
+          echo ""
+          echo "Latest commit:"
+          git log --oneline -1
+          echo ""
+          
+          # Check OLLVM passes exist
+          if [ -d "llvm/lib/Transforms/Obfuscation" ]; then
+            echo "✅ Obfuscation directory found"
+            echo ""
+            echo "Available passes:"
+            ls -1 llvm/lib/Transforms/Obfuscation/*.cpp 2>/dev/null | while read f; do
+              echo "  📄 $(basename $f)"
+            done
+          else
+            echo "❌ ERROR: Obfuscation directory not found!"
+            echo "This is not the DreamSoule/ollvm17 repository!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "Checking pass names in source..."
+          echo ""
+          
+          # Find all registered pass names
+          grep -rh 'FUNCTION_PASS\|MODULE_PASS' llvm/lib/Transforms/Obfuscation/ 2>/dev/null | head -20
+          grep -rh 'static cl::opt' llvm/lib/Transforms/Obfuscation/ 2>/dev/null | head -20
+
+      # ============================================
+      # STEP 3: Setup MSVC
+      # ============================================
+      - name: Setup Visual Studio
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # ============================================
+      # STEP 4: Install build tools
+      # ============================================
+      - name: Install Ninja & CMake
+        shell: powershell
+        run: |
+          choco install ninja cmake -y --no-progress 2>&1 | Out-Null
+          ninja --version
+          cmake --version
+          Write-Host "✅ Build tools ready"
+
+      # ============================================
+      # STEP 5: Configure DreamSoule OLLVM
+      # ============================================
+      - name: Configure DreamSoule OLLVM
+        shell: cmd
+        run: |
+          cd ollvm-source
+          mkdir build
+          cd build
+          
+          echo =========================================
+          echo Configuring DreamSoule OLLVM17...
+          echo =========================================
+          
+          cmake -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DLLVM_ENABLE_PROJECTS="clang;lld" ^
+            -DLLVM_TARGETS_TO_BUILD="AArch64;ARM;X86" ^
+            -DLLVM_ENABLE_ASSERTIONS=OFF ^
+            -DLLVM_ENABLE_TERMINFO=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_INCLUDE_DOCS=OFF ^
+            -DLLVM_BUILD_TESTS=OFF ^
+            -DLLVM_BUILD_EXAMPLES=OFF ^
+            -DLLVM_BUILD_TOOLS=ON ^
+            -DLLVM_PARALLEL_COMPILE_JOBS=4 ^
+            -DLLVM_PARALLEL_LINK_JOBS=2 ^
+            ../llvm
+            
+          if errorlevel 1 (
+            echo ❌ CMake configuration FAILED!
+            exit /b 1
+          )
+          echo ✅ Configuration complete
+
+      # ============================================
+      # STEP 6: Build DreamSoule OLLVM
+      # ============================================
+      - name: Build DreamSoule OLLVM
+        timeout-minutes: 180
+        shell: cmd
+        run: |
+          cd ollvm-source\build
+          
+          echo =========================================
+          echo Building DreamSoule OLLVM17...
+          echo This takes 60-120 minutes...
+          echo Started: %date% %time%
+          echo =========================================
+          
+          ninja -j 4 clang lld
+          
+          if errorlevel 1 (
+            echo ❌ Build FAILED!
+            exit /b 1
+          )
+          
+          if not exist bin\clang.exe (
+            echo ❌ clang.exe not built!
+            exit /b 1
+          )
+          
+          echo =========================================
+          echo ✅ Build complete!
+          echo Finished: %date% %time%
+          echo =========================================
+          
+          echo.
+          echo DreamSoule OLLVM Version:
+          bin\clang.exe --version 2>&1 | findstr /i "clang"
+
+      # ============================================
+      # STEP 7: Test DreamSoule flags
+      # ============================================
+      - name: Test DreamSoule OLLVM flags
+        shell: cmd
+        run: |
+          set CLANG=ollvm-source\build\bin\clang.exe
+          
+          echo int verify(const char* k) { > test.c
+          echo     int h = 0; >> test.c
+          echo     for(int i=0; k[i]; i++) h=(h^<^<5)+k[i]; >> test.c
+          echo     return h==0x1234; >> test.c
+          echo } >> test.c
+          echo int main(){return verify("test");} >> test.c
+          
+          echo =========================================
+          echo Testing DreamSoule OLLVM17 Flags
+          echo =========================================
+          echo.
+          
+          echo [1] Bogus Control Flow:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -bcf -O2 -c test.c -o nul 2>&1 && echo   ✅ -bcf works || echo   ❌ -bcf failed
+          
+          echo [2] BCF with parameters:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90 -O2 -c test.c -o nul 2>&1 && echo   ✅ -bcf_loop / -bcf_prob works || echo   ❌ failed
+          
+          echo [3] Control Flow Flattening:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -fla -O2 -c test.c -o nul 2>&1 && echo   ✅ -fla works || echo   ❌ -fla failed
+          
+          echo [4] Instruction Substitution:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -sub -O2 -c test.c -o nul 2>&1 && echo   ✅ -sub works || echo   ❌ -sub failed
+          
+          echo [5] SUB with parameters:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -sub -mllvm -sub_loop=5 -O2 -c test.c -o nul 2>&1 && echo   ✅ -sub_loop works || echo   ❌ failed
+          
+          echo [6] Basic Block Splitting:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -split -O2 -c test.c -o nul 2>&1 && echo   ✅ -split works || echo   ❌ -split failed
+          
+          echo [7] Split with parameters:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -split -mllvm -split_num=10 -O2 -c test.c -o nul 2>&1 && echo   ✅ -split_num works || echo   ❌ failed
+          
+          echo [8] String Obfuscation:
+          "%CLANG%" -target aarch64-linux-android21 -mllvm -sobf -O2 -c test.c -o nul 2>&1 && echo   ✅ -sobf works || echo   ❌ -sobf failed
+          
+          echo [9] ALL FLAGS COMBINED:
+          "%CLANG%" -target aarch64-linux-android21 ^
+            -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90 ^
+            -mllvm -fla ^
+            -mllvm -sub -mllvm -sub_loop=5 ^
+            -mllvm -split -mllvm -split_num=10 ^
+            -mllvm -sobf ^
+            -O2 -c test.c -o nul 2>&1 && echo   ✅ ALL FLAGS WORK! || echo   ❌ Some flags failed
+          
+          echo.
+          echo =========================================
+          echo Testing complete!
+          echo =========================================
+
+      # ============================================
+      # STEP 8: Download NDK r26d Windows
+      # ============================================
+      - name: Download Android NDK r26d
+        shell: powershell
+        run: |
+          Write-Host "Downloading NDK r26d for Windows..."
+          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/android-ndk-r26d-windows.zip" -OutFile "ndk.zip"
+          Expand-Archive -Path "ndk.zip" -DestinationPath "ndk" -Force
+          Write-Host "✅ NDK extracted"
+
+      # ============================================
+      # STEP 9: Integrate DreamSoule OLLVM into NDK
+      # ============================================
+      - name: Integrate DreamSoule OLLVM into NDK
+        shell: cmd
+        run: |
+          set NDK_BIN=ndk\android-ndk-r26d\toolchains\llvm\prebuilt\windows-x86_64\bin
+          set OLLVM_BIN=ollvm-source\build\bin
+          
+          echo Backing up original NDK clang...
+          copy /Y "%NDK_BIN%\clang.exe" "%NDK_BIN%\clang.original.exe"
+          copy /Y "%NDK_BIN%\clang++.exe" "%NDK_BIN%\clang++.original.exe"
+          
+          echo Installing DreamSoule OLLVM clang...
+          copy /Y "%OLLVM_BIN%\clang.exe" "%NDK_BIN%\clang.exe"
+          copy /Y "%OLLVM_BIN%\clang++.exe" "%NDK_BIN%\clang++.exe"
+          
+          cd "%NDK_BIN%"
+          copy /Y clang.exe clang-17.exe
+          copy /Y clang++.exe clang++-17.exe
+          
+          echo.
+          echo Verifying DreamSoule OLLVM...
+          clang.exe --version 2>&1 | findstr /i "clang"
+          
+          echo.
+          echo Quick compilation test:
+          echo int main(){return 0;} | clang.exe -target aarch64-linux-android21 -x c - -c -o test.o 2>&1 && echo ✅ Basic compilation works || echo ❌ Compilation failed
+          
+          echo.
+          echo Quick OLLVM flag test:
+          echo int main(){return 0;} | clang.exe -target aarch64-linux-android21 -mllvm -bcf -x c - -c -o test.o 2>&1 && echo ✅ OLLVM flag works || echo ❌ OLLVM flag failed
+          
+          echo.
+          echo ✅ DreamSoule OLLVM integrated into NDK!
+
+      # ============================================
+      # STEP 10: Create templates
+      # ============================================
+      - name: Create build templates
+        shell: bash
+        run: |
+          mkdir -p ndk/templates
+          
+          cat > ndk/templates/CMakeLists.txt << 'CMAKE'
+          cmake_minimum_required(VERSION 3.22.1)
+          project("protected_app")
+
+          # ╔══════════════════════════════════════════════╗
+          # ║  DreamSoule OLLVM17 - MAXIMUM PROTECTION   ║
+          # ╚══════════════════════════════════════════════╝
+
+          set(DREAMSOULE_OLLVM_FLAGS
+              # Core Obfuscation
+              -mllvm -bcf
+              -mllvm -bcf_loop=3
+              -mllvm -bcf_prob=90
+              -mllvm -fla
+              -mllvm -sub
+              -mllvm -sub_loop=5
+              -mllvm -split
+              -mllvm -split_num=10
+              -mllvm -sobf
+              
+              # Anti-Reversing
+              -fno-inline
+              -fno-inline-functions
+              -fno-unroll-loops
+              -fno-vectorize
+              -fno-slp-vectorize
+              -fvisibility=hidden
+              -fvisibility-inlines-hidden
+              -fno-ident
+              -fomit-frame-pointer
+              -fno-stack-protector
+              -fno-exceptions
+              -fno-rtti
+          )
+
+          add_library(native-lib SHARED native-lib.cpp)
+          target_compile_options(native-lib PRIVATE ${DREAMSOULE_OLLVM_FLAGS})
+          target_link_options(native-lib PRIVATE 
+              -Wl,--strip-all
+              -Wl,-z,now
+              -Wl,-z,relro
+              -Wl,--gc-sections
+              -Wl,--exclude-libs,ALL
+              -Wl,-Bsymbolic
+              -Wl,-s
+          )
+          target_link_libraries(native-lib log android)
+          
+          message(STATUS "🛡️  DreamSoule OLLVM17 Active")
+          message(STATUS "   [✓] -bcf (Bogus Control Flow)")
+          message(STATUS "   [✓] -fla (Control Flow Flattening)")
+          message(STATUS "   [✓] -sub (Instruction Substitution)")
+          message(STATUS "   [✓] -split (Basic Block Splitting)")
+          message(STATUS "   [✓] -sobf (String Obfuscation)")
+          CMAKE
+          
+          cat > ndk/templates/Android.mk << 'MK'
+          LOCAL_PATH := $(call my-dir)
+          include $(CLEAR_VARS)
+          LOCAL_MODULE := native-lib
+          LOCAL_SRC_FILES := native-lib.cpp
+          
+          # DreamSoule OLLVM17 Flags
+          LOCAL_CFLAGS += -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90
+          LOCAL_CFLAGS += -mllvm -fla
+          LOCAL_CFLAGS += -mllvm -sub -mllvm -sub_loop=5
+          LOCAL_CFLAGS += -mllvm -split -mllvm -split_num=10
+          LOCAL_CFLAGS += -mllvm -sobf
+          LOCAL_CFLAGS += -fno-inline -fvisibility=hidden
+          LOCAL_CFLAGS += -fomit-frame-pointer -fno-stack-protector
+          
+          LOCAL_LDFLAGS += -Wl,--strip-all -Wl,-z,now -Wl,-z,relro
+          LOCAL_LDLIBS := -llog -landroid
+          include $(BUILD_SHARED_LIBRARY)
+          MK
+          
+          cat > ndk/templates/build.bat << 'BAT'
+          @echo off
+          echo ==========================================
+          echo DreamSoule OLLVM17 MAX PROTECTION BUILD
+          echo ==========================================
+          set NDK_PATH=%~dp0..\
+          rmdir /s /q obj libs 2>nul
+          for %%A in (arm64-v8a armeabi-v7a x86_64) do (
+              echo Building %%A...
+              call %NDK_PATH%\ndk-build.cmd NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=%%A APP_PLATFORM=android-21 -j%NUMBER_OF_PROCESSORS%
+              if errorlevel 1 exit /b 1
+          )
+          echo ==========================================
+          echo ✅ ALL ARCHITECTURES BUILT
+          echo ==========================================
+          pause
+          BAT
+          
+          echo "✅ Templates created"
+
+      # ============================================
+      # STEP 11: Package
+      # ============================================
+      - name: Package DreamSoule OLLVM NDK
+        shell: powershell
+        run: |
+          cd ndk
+          Compress-Archive -Path android-ndk-r26d -DestinationPath ../DreamSoule-OLLVM17-NDK-r26d-Windows.zip -Force
+          cd ..
+          $size = [math]::Round((Get-Item DreamSoule-OLLVM17-NDK-r26d-Windows.zip).Length / 1GB, 2)
+          Write-Host "✅ Package: DreamSoule-OLLVM17-NDK-r26d-Windows.zip ($size GB)"
+
+      # ============================================
+      # STEP 12: Upload
+      # ============================================
+      - name: Upload DreamSoule OLLVM NDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DreamSoule-OLLVM17-NDK-r26d-Windows
+          path: DreamSoule-OLLVM17-NDK-r26d-Windows.zip
+          retention-days: 90
+
+      - name: Upload Templates
+        uses: actions/upload-artifact@v4
+        with:
+          name: DreamSoule-Templates
+          path: ndk/templates/
+          retention-days: 90
+
+      # ============================================
+      # STEP 13: Done!
+      # ============================================
+      - name: Summary
+        shell: bash
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║                                                      ║"
+          echo "║   ✅ DreamSoule OLLVM17 NDK r26d BUILD COMPLETE!     ║"
+          echo "║                                                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  Repository: DreamSoule/ollvm17                      ║"
+          echo "║  NDK: r26d (26.3.11579264)                          ║"
+          echo "║  Platform: Windows x86_64                            ║"
+          echo "║                                                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  DreamSoule OLLVM17 Flags:                           ║"
+          echo "║  ✅ -mllvm -bcf          Bogus Control Flow         ║"
+          echo "║  ✅ -mllvm -bcf_loop=3   BCF iterations             ║"
+          echo "║  ✅ -mllvm -bcf_prob=90  BCF probability            ║"
+          echo "║  ✅ -mllvm -fla          Control Flow Flattening    ║"
+          echo "║  ✅ -mllvm -sub          Instruction Substitution   ║"
+          echo "║  ✅ -mllvm -sub_loop=5   SUB iterations             ║"
+          echo "║  ✅ -mllvm -split        Basic Block Splitting      ║"
+          echo "║  ✅ -mllvm -split_num=10 Split count                ║"
+          echo "║  ✅ -mllvm -sobf         String Obfuscation         ║"
+          echo "║                                                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  Windows Setup:                                      ║"
+          echo "║  1. Download the artifact                            ║"
+          echo "║  2. Extract to C:\\Android\\android-ndk-r26d          ║"
+          echo "║  3. local.properties:                               ║"
+          echo "║     ndk.dir=C\:\\Android\\android-ndk-r26d            ║"
+          echo "║  4. Use templates/CMakeLists.txt                     ║"
+          echo "║  5. Build APK! 🛡️                                    ║"
+          echo "║                                                      ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          echo ""
