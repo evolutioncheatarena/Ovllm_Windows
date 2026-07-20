@@ -11,115 +11,211 @@ jobs:
     
     steps:
       # ============================================
-      # STEP 1: Clone DreamSoule/ollvm17
+      # STEP 1: Clone official LLVM 17
       # ============================================
-      - name: Clone DreamSoule/ollvm17
+      - name: Clone LLVM 17.0.6
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/llvm-project
+          ref: llvmorg-17.0.6
+          path: llvm-project
+
+      # ============================================
+      # STEP 2: Clone DreamSoule patches
+      # ============================================
+      - name: Clone DreamSoule/ollvm17 patches
         uses: actions/checkout@v4
         with:
           repository: DreamSoule/ollvm17
           ref: main
-          path: ollvm-source
+          path: dreamsoule-patches
 
       # ============================================
-      # STEP 2: Explore DreamSoule structure
+      # STEP 3: Explore DreamSoule structure
       # ============================================
-      - name: Explore DreamSoule repository structure
+      - name: Explore DreamSoule structure
         shell: bash
         run: |
-          cd ollvm-source
+          cd dreamsoule-patches
           
           echo "========================================="
-          echo "DreamSoule/ollvm17 Repository Structure"
+          echo "DreamSoule/ollvm17 Contents:"
           echo "========================================="
-          
-          echo "Top-level directories:"
-          ls -d */ 2>/dev/null || echo "(root files only)"
-          
+          ls -la
           echo ""
-          echo "Looking for LLVM source..."
-          find . -maxdepth 3 -name "CMakeLists.txt" -path "*/llvm/*" 2>/dev/null | head -10
-          
+          echo "Directory tree:"
+          find . -maxdepth 4 -type d 2>/dev/null | sort
           echo ""
-          echo "Looking for Obfuscation directory..."
-          find . -type d -name "Obfuscation" 2>/dev/null
-          
-          echo ""
-          echo "Looking for OLLVM pass files..."
-          find . -name "BogusControlFlow*" -o -name "Flattening*" -o -name "Substitution*" -o -name "StringObfuscation*" 2>/dev/null
-          
-          echo ""
-          echo "Looking for PassBuilder.cpp..."
-          find . -name "PassBuilder.cpp" 2>/dev/null
-          
-          echo ""
-          echo "Full directory tree (3 levels):"
-          find . -maxdepth 3 -type d 2>/dev/null | sort
+          echo "All files:"
+          find . -type f 2>/dev/null | sort
 
       # ============================================
-      # STEP 3: Setup MSVC
+      # STEP 4: Apply DreamSoule patches to LLVM
       # ============================================
-      - name: Setup Visual Studio
+      - name: Apply DreamSoule OLLVM to LLVM
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "Applying DreamSoule patches..."
+          echo "========================================="
+          
+          # Method 1: Copy entire obfuscation directory
+          if [ -d "dreamsoule-patches/llvm/lib/Transforms/Obfuscation" ]; then
+            echo "Found Obfuscation directory, copying..."
+            cp -r dreamsoule-patches/llvm/lib/Transforms/Obfuscation llvm-project/llvm/lib/Transforms/
+            cp -r dreamsoule-patches/llvm/include/llvm/Transforms/Obfuscation llvm-project/llvm/include/llvm/Transforms/ 2>/dev/null || true
+            echo "✅ Copied Obfuscation passes"
+          fi
+          
+          # Method 2: Copy individual pass files
+          if [ -d "dreamsoule-patches/Transforms/Obfuscation" ]; then
+            echo "Found Transforms/Obfuscation, copying..."
+            mkdir -p llvm-project/llvm/lib/Transforms/Obfuscation
+            mkdir -p llvm-project/llvm/include/llvm/Transforms/Obfuscation
+            cp -r dreamsoule-patches/Transforms/Obfuscation/* llvm-project/llvm/lib/Transforms/Obfuscation/ 2>/dev/null || true
+            cp -r dreamsoule-patches/include/llvm/Transforms/Obfuscation/* llvm-project/llvm/include/llvm/Transforms/Obfuscation/ 2>/dev/null || true
+            echo "✅ Copied from Transforms/Obfuscation"
+          fi
+          
+          # Method 3: If it's a diff/patch
+          if ls dreamsoule-patches/*.diff 2>/dev/null || ls dreamsoule-patches/*.patch 2>/dev/null; then
+            echo "Found patch files, applying..."
+            for patch in dreamsoule-patches/*.diff dreamsoule-patches/*.patch; do
+              [ -f "$patch" ] && patch -p1 -d llvm-project < "$patch" && echo "Applied: $patch"
+            done
+          fi
+          
+          # Method 4: If it's just the modified files
+          if [ -f "dreamsoule-patches/PassBuilder.cpp" ]; then
+            echo "Found PassBuilder.cpp, copying..."
+            cp dreamsoule-patches/PassBuilder.cpp llvm-project/llvm/lib/Passes/PassBuilder.cpp
+            echo "✅ Copied PassBuilder.cpp"
+          fi
+          
+          # Verify passes exist now
+          echo ""
+          echo "Checking if OLLVM passes are in LLVM..."
+          if [ -d "llvm-project/llvm/lib/Transforms/Obfuscation" ]; then
+            echo "✅ Obfuscation directory exists"
+            ls llvm-project/llvm/lib/Transforms/Obfuscation/
+          else
+            echo "⚠️  Creating OLLVM passes manually..."
+            bash -c '
+            cd llvm-project
+            mkdir -p llvm/lib/Transforms/Obfuscation
+            mkdir -p llvm/include/llvm/Transforms/Obfuscation
+            
+            # Create all passes (same as before)
+            for pass in BogusControlFlow Flattening Substitution StringObfuscation; do
+              cat > llvm/include/llvm/Transforms/Obfuscation/${pass}.h << EOF
+          #ifndef LLVM_TRANSFORMS_OBFUSCATION_${pass^^}_H
+          #define LLVM_TRANSFORMS_OBFUSCATION_${pass^^}_H
+          #include "llvm/IR/PassManager.h"
+          namespace llvm {
+          class ${pass} : public PassInfoMixin<${pass}> {
+          public:
+            PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+            static bool isRequired() { return true; }
+          };
+          }
+          #endif
+          EOF
+            done
+            
+            # Special StringObfuscation as Module pass
+            cat > llvm/include/llvm/Transforms/Obfuscation/StringObfuscation.h << EOF
+          #ifndef LLVM_TRANSFORMS_OBFUSCATION_STRINGOBFUSCATION_H
+          #define LLVM_TRANSFORMS_OBFUSCATION_STRINGOBFUSCATION_H
+          #include "llvm/IR/PassManager.h"
+          namespace llvm {
+          class StringObfuscation : public PassInfoMixin<StringObfuscation> {
+          public:
+            PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+            static bool isRequired() { return true; }
+          };
+          }
+          #endif
+          EOF
+            
+            echo "✅ Passes created manually"
+            '
+          fi
+
+      # ============================================
+      # STEP 5: Register passes in LLVM
+      # ============================================
+      - name: Register OLLVM passes
+        shell: bash
+        run: |
+          cd llvm-project
+          
+          # Create CMakeLists for Obfuscation
+          cat > llvm/lib/Transforms/Obfuscation/CMakeLists.txt << 'CMAKE'
+          add_llvm_component_library(LLVMObfuscation
+            BogusControlFlow.cpp
+            Flattening.cpp
+            Substitution.cpp
+            StringObfuscation.cpp
+            LINK_COMPONENTS Core Support TransformUtils
+          )
+          CMAKE
+          
+          # Add to parent CMakeLists
+          if ! grep -q "add_subdirectory(Obfuscation)" llvm/lib/Transforms/CMakeLists.txt; then
+            echo "add_subdirectory(Obfuscation)" >> llvm/lib/Transforms/CMakeLists.txt
+          fi
+          
+          # Add to link deps
+          if ! grep -q "LLVMObfuscation" llvm/lib/Passes/CMakeLists.txt; then
+            sed -i 's/LLVMTransformUtils/LLVMTransformUtils\n  LLVMObfuscation/' llvm/lib/Passes/CMakeLists.txt
+          fi
+          
+          # Register in PassBuilder
+          PASSBUILDER="llvm/lib/Passes/PassBuilder.cpp"
+          
+          if ! grep -q "BogusControlFlow.h" "$PASSBUILDER"; then
+            sed -i '/#include "llvm\/Transforms\/Scalar\/LICM.h"/a\
+          #include "llvm/Transforms/Obfuscation/BogusControlFlow.h"\
+          #include "llvm/Transforms/Obfuscation/Flattening.h"\
+          #include "llvm/Transforms/Obfuscation/Substitution.h"\
+          #include "llvm/Transforms/Obfuscation/StringObfuscation.h"' "$PASSBUILDER"
+          fi
+          
+          if ! grep -q '"bcf"' "$PASSBUILDER"; then
+            sed -i '/FUNCTION_PASS("loop-unroll", LoopUnrollPass())/a\
+            \ \ FUNCTION_PASS("bcf", BogusControlFlow())\
+            \ \ FUNCTION_PASS("fla", Flattening())\
+            \ \ FUNCTION_PASS("sub", Substitution())' "$PASSBUILDER"
+          fi
+          
+          if ! grep -q '"sobf"' "$PASSBUILDER"; then
+            sed -i '/MODULE_PASS("verify", VerifierPass())/a\
+            \ \ MODULE_PASS("sobf", StringObfuscation())' "$PASSBUILDER"
+          fi
+          
+          echo "✅ Passes registered"
+
+      # ============================================
+      # STEP 6: Setup MSVC + Install tools
+      # ============================================
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
 
-      # ============================================
-      # STEP 4: Install build tools
-      # ============================================
-      - name: Install Ninja & CMake
+      - name: Install build tools
         shell: powershell
         run: |
           choco install ninja cmake -y --no-progress 2>&1 | Out-Null
-          ninja --version
-          cmake --version
-          Write-Host "✅ Build tools ready"
+          Write-Host "✅ Tools ready"
 
       # ============================================
-      # STEP 5: Build from whatever structure exists
+      # STEP 7: Configure & Build
       # ============================================
-      - name: Find LLVM root and build
-        shell: bash
-        run: |
-          cd ollvm-source
-          
-          # Find the LLVM root directory
-          LLVM_ROOT=$(find . -maxdepth 2 -name "CMakeLists.txt" -path "*/llvm/*" -exec dirname {} \; | head -1)
-          
-          if [ -z "$LLVM_ROOT" ]; then
-            # Maybe the repo itself is the LLVM root
-            if [ -f "llvm/CMakeLists.txt" ]; then
-              LLVM_ROOT="llvm"
-            elif [ -f "CMakeLists.txt" ]; then
-              LLVM_ROOT="."
-            else
-              echo "Could not find LLVM root!"
-              find . -name "CMakeLists.txt" -maxdepth 3
-              exit 1
-            fi
-          fi
-          
-          echo "LLVM root found at: $LLVM_ROOT"
-          echo "LLVM_ROOT=$LLVM_ROOT" >> $GITHUB_ENV
-          
-          # Check if Obfuscation passes exist
-          OBFUSCATION_DIR=$(find . -type d -name "Obfuscation" | head -1)
-          if [ -n "$OBFUSCATION_DIR" ]; then
-            echo "✅ Obfuscation directory: $OBFUSCATION_DIR"
-            echo "Passes found:"
-            ls "$OBFUSCATION_DIR"/*.cpp 2>/dev/null || echo "  (no .cpp files)"
-          else
-            echo "⚠️  No Obfuscation directory found"
-            echo "Checking if passes are already in PassBuilder..."
-            grep -r "BogusControlFlow\|bcf\|ollvm" "$LLVM_ROOT" --include="*.cpp" --include="*.h" -l | head -10
-          fi
-
-      # ============================================
-      # STEP 6: Configure
-      # ============================================
-      - name: Configure OLLVM
+      - name: Configure
         shell: cmd
         run: |
-          cd ollvm-source
+          cd llvm-project
           mkdir build
           cd build
           
@@ -129,117 +225,26 @@ jobs:
             -DLLVM_TARGETS_TO_BUILD="AArch64;ARM;X86" ^
             -DLLVM_ENABLE_ASSERTIONS=OFF ^
             -DLLVM_INCLUDE_TESTS=OFF ^
-            -DLLVM_INCLUDE_EXAMPLES=OFF ^
             -DLLVM_BUILD_TESTS=OFF ^
-            -DLLVM_BUILD_EXAMPLES=OFF ^
             -DLLVM_BUILD_TOOLS=ON ^
             -DLLVM_PARALLEL_COMPILE_JOBS=4 ^
             -DLLVM_PARALLEL_LINK_JOBS=2 ^
-            ../llvm 2>&1 | tee cmake_log.txt
-            
-          if errorlevel 1 (
-            echo ❌ CMake failed!
-            echo Trying alternative paths...
-            
-            :: Try from root if llvm/ doesn't work
-            cd ..
-            rmdir /s /q build
-            mkdir build
-            cd build
-            
-            cmake -G Ninja ^
-              -DCMAKE_BUILD_TYPE=Release ^
-              -DLLVM_ENABLE_PROJECTS="clang;lld" ^
-              -DLLVM_TARGETS_TO_BUILD="AArch64;ARM;X86" ^
-              -DLLVM_ENABLE_ASSERTIONS=OFF ^
-              -DLLVM_INCLUDE_TESTS=OFF ^
-              -DLLVM_BUILD_TESTS=OFF ^
-              -DLLVM_BUILD_TOOLS=ON ^
-              -DLLVM_PARALLEL_COMPILE_JOBS=4 ^
-              -DLLVM_PARALLEL_LINK_JOBS=2 ^
-              .. 2>&1 | tee cmake_log2.txt
-              
-            if errorlevel 1 (
-              echo ❌ Both attempts failed!
-              type cmake_log.txt
-              type cmake_log2.txt
-              exit /b 1
-            )
-          )
+            ../llvm
+          
+          if errorlevel 1 exit /b 1
           echo ✅ Configured
 
-      # ============================================
-      # STEP 7: Build
-      # ============================================
-      - name: Build OLLVM
+      - name: Build
         timeout-minutes: 180
         shell: cmd
         run: |
-          cd ollvm-source\build
-          
-          echo =========================================
-          echo Building DreamSoule OLLVM17...
-          echo Started: %date% %time%
-          echo =========================================
-          
+          cd llvm-project\build
           ninja -j 4 clang lld
-          
-          if not exist bin\clang.exe (
-            echo ❌ Build failed - clang.exe not found
-            echo Contents of build directory:
-            dir
-            exit /b 1
-          )
-          
-          echo ✅ Built successfully!
-          bin\clang.exe --version 2>&1 | findstr /i "clang"
+          if not exist bin\clang.exe exit /b 1
+          bin\clang.exe --version
 
       # ============================================
-      # STEP 8: Test available flags
-      # ============================================
-      - name: Test DreamSoule flags
-        shell: cmd
-        run: |
-          set CLANG=ollvm-source\build\bin\clang.exe
-          
-          echo int main(){return 0;} > test.c
-          
-          echo =========================================
-          echo Testing ALL possible OLLVM flags...
-          echo =========================================
-          
-          :: List of all known OLLVM flag names
-          for %%F in (
-            "-mllvm -bcf"
-            "-mllvm -bcf_loop=3"
-            "-mllvm -bcf_prob=90"
-            "-mllvm -fla"
-            "-mllvm -sub"
-            "-mllvm -sub_loop=5"
-            "-mllvm -split"
-            "-mllvm -split_num=10"
-            "-mllvm -sobf"
-            "-mllvm -str-obf"
-            "-mllvm -flattening"
-            "-mllvm -boguscf"
-            "-mllvm -substitution"
-            "-mllvm -splitbasicblock"
-            "-mllvm -strcryp"
-            "-mllvm -obf"
-            "-mllvm -ollvm"
-          ) do (
-            "%CLANG%" -target aarch64-linux-android21 %%~F -O2 -c test.c -o nul 2>&1
-            if not errorlevel 1 (
-              echo ✅ %%~F
-            )
-          )
-          
-          echo =========================================
-          echo Testing complete!
-          echo =========================================
-
-      # ============================================
-      # STEP 9: Download NDK & Integrate
+      # STEP 8: Download NDK & Integrate
       # ============================================
       - name: Download NDK r26d
         shell: powershell
@@ -247,45 +252,55 @@ jobs:
           Invoke-WebRequest -Uri "https://dl.google.com/android/repository/android-ndk-r26d-windows.zip" -OutFile "ndk.zip"
           Expand-Archive -Path "ndk.zip" -DestinationPath "ndk" -Force
 
-      - name: Integrate into NDK
+      - name: Integrate
         shell: cmd
         run: |
           set NDK_BIN=ndk\android-ndk-r26d\toolchains\llvm\prebuilt\windows-x86_64\bin
-          set OLLVM_BIN=ollvm-source\build\bin
-          
+          set SRC=llvm-project\build\bin
           copy /Y "%NDK_BIN%\clang.exe" "%NDK_BIN%\clang.original.exe"
           copy /Y "%NDK_BIN%\clang++.exe" "%NDK_BIN%\clang++.original.exe"
-          copy /Y "%OLLVM_BIN%\clang.exe" "%NDK_BIN%\clang.exe"
-          copy /Y "%OLLVM_BIN%\clang++.exe" "%NDK_BIN%\clang++.exe"
-          
+          copy /Y "%SRC%\clang.exe" "%NDK_BIN%\clang.exe"
+          copy /Y "%SRC%\clang++.exe" "%NDK_BIN%\clang++.exe"
           cd "%NDK_BIN%"
           copy /Y clang.exe clang-17.exe
           copy /Y clang++.exe clang++-17.exe
-          
-          echo ✅ Integrated!
+          echo ✅ Integrated
 
       # ============================================
-      # STEP 10: Package
+      # STEP 9: Test flags
+      # ============================================
+      - name: Test flags
+        shell: cmd
+        run: |
+          set CLANG=ndk\android-ndk-r26d\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe
+          echo int main(){return 0;} > test.c
+          
+          for %%F in ("-mllvm -bcf" "-mllvm -fla" "-mllvm -sub" "-mllvm -sobf" "-mllvm -bcf -mllvm -fla -mllvm -sub -mllvm -sobf") do (
+            "%CLANG%" -target aarch64-linux-android21 %%~F -O2 -c test.c -o nul 2>&1 && echo ✅ %%~F || echo ❌ %%~F
+          )
+
+      # ============================================
+      # STEP 10: Package & Upload
       # ============================================
       - name: Package
         shell: powershell
         run: |
           cd ndk
-          Compress-Archive -Path android-ndk-r26d -DestinationPath ../DreamSoule-OLLVM17-NDK.zip -Force
-          Write-Host "✅ Packaged"
+          Compress-Archive -Path android-ndk-r26d -DestinationPath ../DreamSoule-OLLVM17-NDK-r26d.zip -Force
+          Write-Host "✅ Done"
 
-      - name: Upload
+      - name: Upload NDK
         uses: actions/upload-artifact@v4
         with:
-          name: DreamSoule-OLLVM17-NDK
-          path: DreamSoule-OLLVM17-NDK.zip
+          name: DreamSoule-OLLVM17-NDK-r26d-Windows
+          path: DreamSoule-OLLVM17-NDK-r26d.zip
           retention-days: 90
 
       - name: Upload exploration logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: repo-structure-info
+          name: dreamSoule-exploration
           path: |
-            ollvm-source/build/cmake_log*.txt
+            dreamsoule-patches/
           retention-days: 7
